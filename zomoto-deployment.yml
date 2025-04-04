@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: zomoto-container
-          image: zomoto:latest
+          image: athult123/zomoto:latest
           ports:
             - containerPort: 3000
 ---
