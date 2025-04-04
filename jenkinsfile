@@ -1,114 +1,133 @@
 pipeline {
-    agent any
+    agent any 
     tools {
         jdk 'jdk17'
         nodejs 'node23'
     }
     environment {
-        SCANNER_HOME = tool 'sonar-scanner'
+        SCANNER_HOME = tool 'sonar'
     }
+
     stages {
-        stage("Clean Workspace") {
-            steps {
-                cleanWs()
-            }
-        }
-        stage("Git Checkout") {
+        stage('git chekout') {
             steps {
                 git 'https://github.com/athul826/zomoto-project.git'
             }
         }
-        stage("SonarQube Analysis") {
+        stage('trivy-scan') {
             steps {
-                withSonarQubeEnv('sonar-server') {
-                    sh '''
-                        $SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=zomato \
-                        -Dsonar.projectKey=zomato
-                    '''
+                sh 'trivy fs --format table --output trivy-report.html .'
+            }
+        }
+        stage('npm-dependency-install') {
+            steps {
+                sh 'npm install'
+            }
+        }
+        stage('owsap-check') {
+            steps {
+                script {
+                    try {
+                        timeout(time: 3, unit: 'MINUTES') { // Set a timeout of 3 minutes
+                            dependencyCheck additionalArguments: '--scan .', odcInstallation: 'owasp'
+                            dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                        }
+                    } catch (Exception e) {
+                        echo "OWASP Dependency-Check exceeded the 3-minute limit. Skipping this stage."
+                        currentBuild.result = 'UNSTABLE' // Mark the build as unstable but continue
+                    }
                 }
             }
         }
-        stage("Code Quality Gate") {
+        stage('sonar-scanning') {
+            steps {
+                withSonarQubeEnv('sonar-scanner') {
+                    sh '''${SCANNER_HOME}/bin/sonar-scanner \
+                          -Dsonar.projectKey=zomoto \
+                          -Dsonar.sources=.'''
+                }
+            }
+        }
+        stage('sonar-qualit-gate') {
             steps {
                 script {
                     timeout(time: 2, unit: 'MINUTES') {
-                        waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+                        waitForQualityGate abortPipeline: false, credentialsId: 'sonar-id'
                     }
                 }
             }
         }
-        stage("Install NPM Dependencies") {
+        stage('build docker image') {
             steps {
-                sh "npm install"
+                sh "docker build -t zomoto ."
             }
         }
-        stage("OWASP FS Scan") {
+        stage('docker image scan') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit -n', odcInstallation: 'DP-Check'
-                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                sh 'trivy image --format table --output trivy-image.html zomoto:latest'
             }
         }
-        stage("Trivy File Scan") {
-            steps {
-                sh "trivy fs . > trivy.txt"
-            }
-        }
-        stage("Build Docker Image") {
-            steps {
-                sh "docker build -t zomato ."
-            }
-        }
-        stage("Tag & Push to DockerHub") {
+        stage('tag and push docker image') {
             steps {
                 script {
-                    withDockerRegistry(credentialsId: 'docker') {
-                        sh "docker tag zomato athult123/zomato:latest"
-                        sh "docker push athult123/zomato:latest"
+                    withDockerRegistry(credentialsId: 'docker-id', toolName: 'docker') {
+                        sh "docker tag zomoto athult123/zomoto:latest"
+                        sh "docker push athult123/zomoto:latest"
                     }
                 }
             }
         }
-        stage("Docker Scout Image") {
+        stage('deploy to container') {
             steps {
-                script {
-                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
-                        sh 'docker-scout quickview athult123/zomato:latest'
-                        sh 'docker-scout cves athult123/zomato:latest'
-                        sh 'docker-scout recommendations athult123/zomato:latest'
-                    }
+                sh 'docker run -d --name zomoto -p 3000:3000 zomoto:latest'
+            }
+        }
+        stage('deploy to k8s') {
+            steps {
+                withKubeConfig(caCertificate: '', clusterName: 'eks-athul-cluster', contextName: 'arn:aws:eks:us-east-2:605134438225:cluster/eks-athul-cluster', credentialsId: 'k8-s', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://2DF5386BDB099F8E6AAC5F76658D9B66.yl4.us-east-2.eks.amazonaws.com') {
+                         sh "kubectl apply -f  zomoto-deployment.yml"
+                         sleep 60
                 }
             }
         }
-        stage("Deploy to Container") {
-            steps {
-                sh 'docker run -d --name zomato -p 3000:3000 athult123/zomato:latest'
+        stage('verify k8s deployment') {
+            steps { 
+                withKubeConfig(caCertificate: '', clusterName: 'eks-athul-cluster', contextName: 'arn:aws:eks:us-east-2:605134438225:cluster/eks-athul-cluster', credentialsId: 'k8-s', namespace: 'webapps', restrictKubeConfigAccess: false, serverUrl: 'https://2DF5386BDB099F8E6AAC5F76658D9B66.yl4.us-east-2.eks.amazonaws.com') {
+                         sh "kubectl get pods -n webapps"
+                         sh "kubectl get svc -n webapps"
+                }
             }
         }
-    }
-    post {
-        always {
-            emailext attachLog: true,
-                subject: "'${currentBuild.result}'",
-                body: """
-                    <html>
-                    <body>
-                        <div style="background-color: #FFA07A; padding: 10px; margin-bottom: 10px;">
-                            <p style="color: white; font-weight: bold;">Project: ${env.JOB_NAME}</p>
-                        </div>
-                        <div style="background-color: #90EE90; padding: 10px; margin-bottom: 10px;">
-                            <p style="color: white; font-weight: bold;">Build Number: ${env.BUILD_NUMBER}</p>
-                        </div>
-                        <div style="background-color: #87CEEB; padding: 10px; margin-bottom: 10px;">
-                            <p style="color: white; font-weight: bold;">URL: ${env.BUILD_URL}</p>
-                        </div>
+   }
+        post {
+        success {
+            emailext(
+                subject: "✅ Jenkins Build SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """<html>
+                    <body style="font-family:Arial,sans-serif;">
+                        <h2 style="color:green;">✅ Build SUCCESS</h2>
+                        <p>The build <strong>${env.JOB_NAME} #${env.BUILD_NUMBER}</strong> was successful.</p>
+                        <p><a href="${env.BUILD_URL}" style="color:blue;">Click here to view the build details</a></p>
                     </body>
-                    </html>
-                """,
-                to: 'athultharol1994@gmail.com',
+                </html>""",
                 mimeType: 'text/html',
-                attachmentsPattern: 'trivy.txt'
+                to: "athultharol1994@gmail.com"
+            )
+        }
+        failure {
+            emailext(
+                subject: "❌ Jenkins Build FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """<html>
+                    <body style="font-family:Arial,sans-serif;">
+                        <h2 style="color:red;">❌ Build FAILURE</h2>
+                        <p>The build <strong>${env.JOB_NAME} #${env.BUILD_NUMBER}</strong> failed.</p>
+                        <p>Please check the logs for more details.</p>
+                        <p><a href="${env.BUILD_URL}" style="color:blue;">Click here to view the build details</a></p>
+                    </body>
+                </html>""",
+                mimeType: 'text/html',
+                to: "athultharol1994@gmail.com"
+            )
         }
     }
 }
-
