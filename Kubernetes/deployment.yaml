@@ -1,21 +1,31 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: zomato
-  labels:
-    app: zomato
+  name: zomoto
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: zomato
+      app: zomoto
   template:
     metadata:
       labels:
-        app: zomato
+        app: zomoto
     spec:
       containers:
-      - name: zomato
-        image: kastrov/zomato:latest
-        ports:
-        - containerPort: 3000
+        - name: zomoto-container
+          image: athult123/zomoto:latest
+          ports:
+            - containerPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zomoto-service
+spec:
+  selector:
+    app: zomoto
+  ports:
+    - port: 3000
+      targetPort: 3000
+  type: NodePort
